@@ -208,3 +208,34 @@ export function formatHumanError(error: unknown, verbose = false): string {
 
   return output;
 }
+
+/**
+ * JSON-RPC reserved code for a method the server does not implement.
+ */
+export const JSON_RPC_METHOD_NOT_FOUND = -32601;
+
+/**
+ * Did the server answer "I do not implement that method"?
+ *
+ * This is a *response*, not a transport failure: the server was reached, parsed
+ * the request and replied. Callers probing for liveness must treat it as proof
+ * the server is alive, not as an error.
+ *
+ * Accepts the raw SDK error or one of ours wrapping it in `details.originalError`.
+ * The SDK names its JSON-RPC error `ProtocolError` (v2) or `McpError` (v1) —
+ * the latter collides by name with our own base class, so the code is what
+ * decides. Deliberately code-only: the wording differs between servers ("Method
+ * not found: ping" vs "Unknown method: ping") but both send -32601, so there is
+ * no case here that a message regex would catch and a stricter check would not.
+ */
+export function isMethodNotFoundError(error: unknown): boolean {
+  const wrapper = error as { details?: { originalError?: unknown } } | undefined;
+  const original = (wrapper?.details?.originalError ?? error) as
+    | { name?: string; code?: number }
+    | undefined;
+
+  if (!original) return false;
+  if (original.name !== 'ProtocolError' && original.name !== 'McpError') return false;
+
+  return original.code === JSON_RPC_METHOD_NOT_FOUND;
+}

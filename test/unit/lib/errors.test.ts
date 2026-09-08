@@ -11,6 +11,7 @@ import {
   isMcpError,
   toMcpError,
   formatHumanError,
+  isMethodNotFoundError,
 } from '../../../src/lib/errors';
 
 describe('McpError', () => {
@@ -154,5 +155,60 @@ describe('formatError', () => {
   it('should format non-McpError values', () => {
     const formatted = formatHumanError('simple string', false);
     expect(formatted).toBe('Error: simple string');
+  });
+});
+
+describe('isMethodNotFoundError', () => {
+  // A server that answers "I do not implement that method" was reached, parsed
+  // the request and replied. Liveness probes must read that as alive.
+  const protocolError = (message: string, code?: number) =>
+    Object.assign(new Error(message), { name: 'ProtocolError', code });
+
+  it('recognises the reserved JSON-RPC code', () => {
+    expect(isMethodNotFoundError(protocolError('Method not found: ping', -32601))).toBe(true);
+  });
+
+  it('recognises the SDK v1 error name', () => {
+    const v1 = Object.assign(new Error('Method not found: ping'), {
+      name: 'McpError',
+      code: -32601,
+    });
+    expect(isMethodNotFoundError(v1)).toBe(true);
+  });
+
+  it('unwraps one of our errors carrying the original', () => {
+    const wrapped = new NetworkError('Ping failed: Method not found: ping', {
+      originalError: protocolError('Method not found: ping', -32601),
+    });
+    expect(isMethodNotFoundError(wrapped)).toBe(true);
+  });
+
+  it('recognises it regardless of the wording servers choose', () => {
+    // Slack says "Method not found: ping", Day One "Unknown method: ping";
+    // both send -32601, so the code alone decides and no message parsing is
+    // needed.
+    expect(isMethodNotFoundError(protocolError('Unknown method: ping', -32601))).toBe(true);
+  });
+
+  it('does not guess from the message when the code is absent', () => {
+    // A protocol error without the reserved code is not evidence of an
+    // unimplemented method, however it is worded.
+    expect(isMethodNotFoundError(protocolError('Unknown method: ping'))).toBe(false);
+  });
+
+  it('does not treat other protocol errors as method-not-found', () => {
+    expect(isMethodNotFoundError(protocolError('Invalid params', -32602))).toBe(false);
+  });
+
+  it('does not treat a transport failure as method-not-found', () => {
+    // The whole point: a real connection failure must stay a failure, even
+    // though its message could mention a method.
+    const transport = Object.assign(new Error('fetch failed: ping'), { name: 'TypeError' });
+    expect(isMethodNotFoundError(transport)).toBe(false);
+  });
+
+  it('handles absent input', () => {
+    expect(isMethodNotFoundError(undefined)).toBe(false);
+    expect(isMethodNotFoundError(null)).toBe(false);
   });
 });

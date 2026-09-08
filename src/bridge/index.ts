@@ -48,6 +48,7 @@ import {
   NetworkError,
   AuthError,
   isAuthenticationError,
+  isMethodNotFoundError,
 } from '../lib/index.js';
 import { getSession, loadSessions, updateSession } from '../lib/sessions.js';
 import type { AuthCredentials, X402WalletCredentials } from '../lib/types.js';
@@ -115,6 +116,9 @@ class BridgeProcess {
   private socketPath: string;
   private isShuttingDown = false;
   private keepaliveInterval: NodeJS.Timeout | null = null;
+  // Latched once a server answers the keepalive ping with "method not found",
+  // so the explanatory log line is written once per session, not every 30s.
+  private pingUnsupported = false;
 
   // OAuth token manager (created when CLI sends auth credentials via IPC)
   private tokenManager: OAuthTokenManager | null = null;
@@ -1065,10 +1069,26 @@ class BridgeProcess {
     }
 
     logger.debug('Sending keepalive ping');
-    await this.client.ping();
-    logger.debug('Keepalive ping successful');
+    try {
+      await this.client.ping();
+      logger.debug('Keepalive ping successful');
+    } catch (error) {
+      // `ping` is optional in the protocol and some servers do not implement
+      // it, answering -32601 (Slack, Day One). That is a JSON-RPC *response* —
+      // the server was reached, parsed the request and replied — so it proves
+      // liveness just as well as a pong. Treating it as a failed probe left
+      // such sessions permanently `disconnected` while every real call
+      // succeeded.
+      if (!isMethodNotFoundError(error)) {
+        throw error;
+      }
+      if (!this.pingUnsupported) {
+        this.pingUnsupported = true;
+        logger.info('Server does not implement ping; treating its error response as liveness');
+      }
+    }
 
-    // Update lastSeenAt on successful ping
+    // Update lastSeenAt on a successful probe
     await this.updateLastSeenAt();
   }
 
@@ -1727,6 +1747,13 @@ class BridgeProcess {
         default:
           throw new ClientError(`Unknown MCP method: ${message.method}`);
       }
+
+      // The server just answered, which is the strongest liveness evidence there
+      // is — stronger than a keepalive ping. SessionEntry.lastSeenAt is
+      // documented as "Last successful server response (ping, command, etc.)",
+      // but until now only pings refreshed it, so a session carrying real
+      // traffic could still age into `disconnected`.
+      await this.updateLastSeenAt();
 
       if (message.id) {
         this.sendResponse(socket, {
